@@ -12,22 +12,27 @@ import           Universum
 
 import           Control.Exception                (throw)
 import           Control.Monad.Except             (runExcept)
+import qualified Data.ByteArray                   as DBA
 import           Formatting                       (sformat, (%))
 import qualified Formatting                       as F
 
 import           Pos.Aeson.ClientTypes            ()
 import           Pos.Aeson.WalletBackup           ()
+import           Pos.Binary.Class                 (biSize)
 import           Pos.Client.Txp.Addresses         (MonadAddresses (..))
 import           Pos.Client.Txp.Balances          (getOwnUtxos)
 import           Pos.Client.Txp.History           (TxHistoryEntry (..))
 import           Pos.Client.Txp.Util              (computeTxFee, runTxCreator)
 import           Pos.Communication                (SendActions (..), prepareMTx)
 import           Pos.Configuration                (HasNodeConfiguration)
-import           Pos.Core                         (Coin, HasConfiguration, addressF,
-                                                   getCurrentTimestamp)
-import           Pos.Crypto                       (PassPhrase, ShouldCheckPassphrase (..),
-                                                   checkPassMatches, hash,
-                                                   withSafeSignerUnsafe)
+import           Pos.Core                         (Coin, HasConfiguration,
+                                                   IsBootstrapEraAddr (..), addressF,
+                                                   deriveLvl2KeyPair, getCurrentTimestamp,
+                                                   maxHDAddressSizeBoot)
+import           Pos.Crypto                       (PassPhrase, SecretKey (..),
+                                                   ShouldCheckPassphrase (..),
+                                                   checkPassMatches, hash, keyGen,
+                                                   mkEncSecret, withSafeSignerUnsafe)
 import           Pos.Infra.Configuration          (HasInfraConfiguration)
 import           Pos.Ssc.GodTossing.Configuration (HasGtConfiguration)
 import           Pos.Txp                          (TxFee (..), Utxo, _txOutputs)
@@ -137,6 +142,23 @@ instance
     getNewAddress (accId, passphrase) = do
         clientAddress <- L.newAddress RandomSeed passphrase accId
         decodeCTypeOrFail (cadId clientAddress)
+    -- We are creating a sample HD address here. It has the same
+    -- length (76) as the biggest one created by Daedalus.
+    getFakeChangeAddress = do
+        let passphrase = DBA.replicate 10 255
+        SecretKey sk <- snd <$> keyGen
+        encSK <- mkEncSecret passphrase sk
+        case deriveLvl2KeyPair
+                 (IsBootstrapEraAddr True)
+                 (ShouldCheckPassphrase False)
+                 passphrase
+                 encSK
+                 maxBound
+                 maxBound of
+            Nothing -> throwM $ InternalError "getFakeChangeAddress failed"
+            Just (addr, _)
+                | biSize addr == maxHDAddressSizeBoot -> return addr
+                | otherwise -> getFakeChangeAddress
 
 sendMoney
     :: MonadWalletWebMode m

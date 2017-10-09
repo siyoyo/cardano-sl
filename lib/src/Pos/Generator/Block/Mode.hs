@@ -25,12 +25,14 @@ import qualified Control.Monad.Catch
 import           Control.Monad.Random.Strict      (RandT)
 import           Control.Monad.Trans.Control      (MonadBaseControl)
 import qualified Crypto.Random                    as Rand
+import qualified Data.ByteString                  as BS
 import           Data.Default                     (Default)
 import           Mockable                         (Async, Catch, Concurrently,
                                                    CurrentTime, Delay, Mockables, Promise,
                                                    Throw)
 import           System.Wlog                      (WithLogger, logWarning)
 
+import           Pos.Binary.Class                 (biSize)
 import           Pos.Block.BListener              (MonadBListener (..), onApplyBlocksStub,
                                                    onRollbackBlocksStub)
 import           Pos.Block.Core                   (Block, BlockHeader)
@@ -41,8 +43,10 @@ import           Pos.Configuration                (HasNodeConfiguration)
 import           Pos.Core                         (Address, GenesisWStakeholders (..),
                                                    HasConfiguration, HasPrimaryKey (..),
                                                    IsHeader, SlotId (..), Timestamp,
-                                                   epochOrSlotToSlot, getEpochOrSlot)
-import           Pos.Crypto                       (SecretKey)
+                                                   epochOrSlotToSlot, getEpochOrSlot,
+                                                   makePubKeyAddressBoot,
+                                                   maxPubKeyAddressSizeBoot)
+import           Pos.Crypto                       (SecretKey, deterministicKeyGen)
 import           Pos.DB                           (DBSum, MonadBlockDBGeneric (..),
                                                    MonadBlockDBGenericWrite (..), MonadDB,
                                                    MonadDBRead)
@@ -375,6 +379,19 @@ instance MonadBlockGenBase m => MonadBListener (BlockGenMode ext m) where
 instance Monad m => MonadAddresses (BlockGenMode ext m) where
     type AddrData (BlockGenMode ext m) = Address
     getNewAddress = pure
+    getFakeChangeAddress = pure (go 0)
+      where
+        -- We want it to be deterministic. It must be consistent with
+        -- the way we construct address in block-gen. If it's changed,
+        -- tests will fail, so we will notice it.
+        go :: Word8 -> Address
+        go i =
+            let addr =
+                    makePubKeyAddressBoot . fst $
+                    deterministicKeyGen (BS.replicate 32 i)
+            in if biSize addr == maxPubKeyAddressSizeBoot
+                   then addr
+                   else go (i + 1)
 
 type instance MempoolExt (BlockGenMode ext m) = ext
 

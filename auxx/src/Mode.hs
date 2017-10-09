@@ -28,6 +28,7 @@ import           Control.Monad.Reader             (withReaderT)
 import           Mockable                         (Production)
 import           System.Wlog                      (HasLoggerName (..))
 
+import           Pos.Binary                       (biSize)
 import           Pos.Block.BListener              (MonadBListener (..))
 import           Pos.Block.Core                   (Block, BlockHeader)
 import           Pos.Block.Slog                   (HasSlogContext (..),
@@ -45,9 +46,11 @@ import           Pos.Core                         (Address, HasConfiguration,
                                                    HasPrimaryKey (..),
                                                    IsBootstrapEraAddr (..), IsHeader,
                                                    deriveFirstHDAddress,
-                                                   makePubKeyAddress, siEpoch)
+                                                   makePubKeyAddress,
+                                                   maxPubKeyAddressSizeBoot,
+                                                   maxPubKeyAddressSizeSingleKey, siEpoch)
 import           Pos.Crypto                       (EncryptedSecretKey, PublicKey,
-                                                   emptyPassphrase)
+                                                   emptyPassphrase, keyGen)
 import           Pos.DB                           (MonadGState (..), gsIsBootstrapEra)
 import           Pos.DB.Class                     (MonadBlockDBGeneric (..),
                                                    MonadBlockDBGenericWrite (..),
@@ -227,6 +230,15 @@ instance MonadFormatPeers AuxxMode where
 instance (HasConfiguration, HasInfraConfiguration) => MonadAddresses AuxxMode where
     type AddrData AuxxMode = PublicKey
     getNewAddress = makePubKeyAddressAuxx
+    getFakeChangeAddress = do
+        pk <- fst <$> keyGen
+        addr <- makePubKeyAddressAuxx pk
+        let addrSize = biSize addr
+        let isOk =
+                addrSize == maxPubKeyAddressSizeBoot ||
+                addrSize == maxPubKeyAddressSizeSingleKey
+        if | isOk -> return addr
+           | otherwise -> getFakeChangeAddress
 
 type instance MempoolExt AuxxMode = EmptyMempoolExt
 
