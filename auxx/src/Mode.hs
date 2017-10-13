@@ -53,11 +53,13 @@ import           Pos.DB                           (DBSum (..), MonadGState (..),
 import           Pos.DB.Class                     (MonadBlockDBGeneric (..),
                                                    MonadBlockDBGenericWrite (..),
                                                    MonadDB (..), MonadDBRead (..))
+import           Pos.Generator.Block              (BlockGenMode)
 import           Pos.GState                       (HasGStateContext (..),
                                                    getGStateImplicit)
 import           Pos.Infra.Configuration          (HasInfraConfiguration)
 import           Pos.KnownPeers                   (MonadFormatPeers (..),
                                                    MonadKnownPeers (..))
+import           Pos.Launcher                     (HasConfigurations)
 import           Pos.Network.Types                (HasNodeType (..), NodeType (..))
 import           Pos.Reporting                    (HasReportingContext (..))
 import           Pos.Shutdown                     (HasShutdownContext (..))
@@ -67,7 +69,8 @@ import           Pos.Ssc.Class                    (HasSscContext (..), SscBlock)
 import           Pos.Ssc.GodTossing               (SscGodTossing)
 import           Pos.Ssc.GodTossing.Configuration (HasGtConfiguration)
 import           Pos.Txp                          (MempoolExt, MonadTxpLocal (..),
-                                                   txNormalize, txProcessTransaction)
+                                                   txNormalize, txProcessTransaction,
+                                                   txProcessTransactionNoLock)
 import           Pos.Txp.DB.Utxo                  (getFilteredUtxo)
 import           Pos.Util                         (Some (..))
 import           Pos.Util.JsonLog                 (HasJsonLogConfig (..))
@@ -247,6 +250,11 @@ type instance MempoolExt AuxxMode = EmptyMempoolExt
 instance (HasConfiguration, HasInfraConfiguration) => MonadTxpLocal AuxxMode where
     txpNormalize = withReaderT acRealModeContext txNormalize
     txpProcessTx = withReaderT acRealModeContext . txProcessTransaction
+
+instance (HasConfigurations) =>
+         MonadTxpLocal (BlockGenMode EmptyMempoolExt AuxxMode) where
+    txpNormalize = txNormalize
+    txpProcessTx = txProcessTransactionNoLock
 
 -- | In order to create an 'Address' from a 'PublicKey' we need to
 -- choose suitable stake distribution. We want to pick it based on

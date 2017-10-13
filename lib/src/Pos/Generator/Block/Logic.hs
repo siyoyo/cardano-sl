@@ -29,9 +29,10 @@ import           Pos.Crypto                  (pskDelegatePk)
 import           Pos.DB.DB                   (getTipHeader)
 import           Pos.Delegation.Logic        (getDlgTransPsk)
 import           Pos.Generator.Block.Error   (BlockGenError (..))
-import           Pos.Generator.Block.Mode    (BlockGenRandMode, MonadBlockGen,
-                                              MonadBlockGenInit, mkBlockGenContext,
-                                              usingPrimaryKey, withCurrentSlot)
+import           Pos.Generator.Block.Mode    (BlockGenMode, BlockGenRandMode,
+                                              MonadBlockGen, MonadBlockGenInit,
+                                              mkBlockGenContext, usingPrimaryKey,
+                                              withCurrentSlot)
 import           Pos.Generator.Block.Param   (BlockGenParams, HasBlockGenParams (..))
 import           Pos.Generator.Block.Payload (genPayload)
 import           Pos.Lrc                     (lrcSingleShot)
@@ -50,7 +51,7 @@ type BlockTxpGenMode g ctx m =
     ( RandomGen g
     , MonadBlockGenInit ctx m
     , Default (MempoolExt m)
-    , MonadTxpLocal m
+    , MonadTxpLocal (BlockGenMode (MempoolExt m) m)
     )
 
 -- | Generate an arbitrary sequence of valid blocks. The blocks are
@@ -80,7 +81,7 @@ genBlock ::
        ( RandomGen g
        , MonadBlockGen ctx m
        , Default (MempoolExt m)
-       , MonadTxpLocal m
+       , MonadTxpLocal (BlockGenMode (MempoolExt m) m)
        )
     => EpochOrSlot
     -> BlockGenRandMode (MempoolExt m) g m (Maybe (Blund SscGodTossing))
