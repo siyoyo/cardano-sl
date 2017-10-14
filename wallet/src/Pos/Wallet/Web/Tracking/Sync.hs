@@ -50,7 +50,8 @@ import           System.Wlog                      (HasLoggerName, WithLogger, lo
 import           Pos.Block.Core                   (BlockHeader, getBlockHeader,
                                                    mainBlockTxPayload)
 import           Pos.Block.Types                  (Blund, undoTx)
-import           Pos.Client.Txp.History           (TxHistoryEntry (..), txHistoryListToMap)
+import           Pos.Client.Txp.History           (TxHistoryEntry (..),
+                                                   txHistoryListToMap)
 import           Pos.Core                         (Address (..), BlockHeaderStub,
                                                    ChainDifficulty, HasConfiguration,
                                                    HasDifficulty (..), HeaderHash,
@@ -74,9 +75,9 @@ import           Pos.Slotting                     (MonadSlots (..), MonadSlotsDa
 import           Pos.StateLock                    (Priority (..), StateLock,
                                                    withStateLockNoMetrics)
 import           Pos.Txp                          (GenesisUtxo (..), Tx (..), TxAux (..),
-                                                   TxIn (..), TxOutAux (..), TxUndo,
-                                                   flattenTxPayload, genesisUtxo, toaOut,
-                                                   topsortTxs, txOutAddress)
+                                                   TxIn (..), TxOut, TxOutAux (..),
+                                                   TxUndo, flattenTxPayload, genesisUtxo,
+                                                   toaOut, topsortTxs, txOutAddress)
 import           Pos.Txp.MemState.Class           (MonadTxpMem, getLocalTxsNUndo)
 import           Pos.Util.Chrono                  (getNewestFirst)
 import qualified Pos.Util.Modifier                as MM
@@ -300,15 +301,6 @@ syncWalletWithGStateUnsafe encSK wTipHeader gstateH = setLogger $ do
         maybe (error "Unexpected state: genesisHash doesn't have forward link")
             (maybe (error "No genesis block corresponding to header hash") pure <=< DB.blkGetHeader)
 
--- TODO: @pva701: maybe it would be needed, dunno
--- runWithWalletUtxo
---     :: (MonadReader ctx m, HasLens GenesisUtxo ctx GenesisUtxo, WebWalletModeDB ctx m)
---     => ToilT () (DBToil m) a
---     -> m a
--- runWithWalletUtxo action = do
---     walletUtxo <- WS.getWalletUtxo
---     runDBToil $ fst <$> runToilTLocal (fromUtxo walletUtxo) def mempty action
-
 -- Process transactions on block application,
 -- decrypt our addresses, and add/delete them to/from wallet-db.
 -- Addresses are used in TxIn's will be deleted,
@@ -328,7 +320,7 @@ trackingApplyTxs (getEncInfo -> encInfo) allAddresses getDiff getTs getPtxBlkInf
     toTxInOut txid (idx, out) = (TxInUtxo txid idx, TxOutAux out)
 
     applyTx :: CAccModifier -> (TxAux, TxUndo, BlockHeader ssc) -> CAccModifier
-    applyTx CAccModifier{..} (TxAux {..}, undo, blkHeader) =
+    applyTx CAccModifier{..} (TxAux {..}, undo, blkHeader) = do
         let hh = headerHash blkHeader
             mDiff = getDiff blkHeader
             mTs = getTs blkHeader
@@ -336,15 +328,17 @@ trackingApplyTxs (getEncInfo -> encInfo) allAddresses getDiff getTs getPtxBlkInf
             tx@(UnsafeTx (NE.toList -> inps) (NE.toList -> outs) _) = taTx
             !txId = hash tx
             -- TODO should we do something with unknown inputs?
+        let resolvedInputs :: [(TxIn, TxOutAux)]
             resolvedInputs = catMaybes $ zipWith (fmap . (,)) inps (NE.toList undo)
             txOutgoings = map txOutAddress outs
             txInputs = map (toaOut . snd) resolvedInputs
 
+        let ownInputs :: [((TxIn, TxOutAux), CWAddressMeta)]
             ownInputs = selectOwnAddresses encInfo (txOutAddress . toaOut . snd) resolvedInputs
-            ownOutputs = selectOwnAddresses encInfo (txOutAddress . snd) $
-                enumerate outs
-            ownInpAddrMetas = map snd ownInputs
-            ownOutAddrMetas = map snd ownOutputs
+        let ownOutputs :: [((Word32, TxOut), CWAddressMeta)]
+            ownOutputs = selectOwnAddresses encInfo (txOutAddress . snd) (enumerate outs)
+        -- TODO ^ this part duplicates @rollbackTx@ part, move to function
+
             ownTxIns = map (fst . fst) ownInputs
             ownTxOuts = map (toTxInOut txId . fst) ownOutputs
 
@@ -354,8 +348,8 @@ trackingApplyTxs (getEncInfo -> encInfo) allAddresses getDiff getTs getPtxBlkInf
                      camAddedHistory
                 else camAddedHistory
 
-            usedAddrs = map cwamId ownOutAddrMetas
-            changeAddrs = evalChange allAddresses (map cwamId ownInpAddrMetas) usedAddrs
+            usedAddrs = map (cwamId . snd) ownOutputs
+            changeAddrs = evalChange allAddresses (map (cwamId . snd) ownInputs) usedAddrs
 
             mPtxBlkInfo = getPtxBlkInfo blkHeader
             addedPtxCandidates =
@@ -363,8 +357,8 @@ trackingApplyTxs (getEncInfo -> encInfo) allAddresses getDiff getTs getPtxBlkInf
                      -> DL.cons (txId, ptxBlkInfo) camAddedPtxCandidates
                    | otherwise
                      -> camAddedPtxCandidates
-        in CAccModifier
-            (deleteAndInsertIMM [] ownOutAddrMetas camAddresses)
+        CAccModifier
+            (deleteAndInsertIMM [] (map snd ownOutputs) camAddresses)
             (deleteAndInsertVM [] (zip usedAddrs hhs) camUsed)
             (deleteAndInsertVM [] (zip changeAddrs hhs) camChange)
             (deleteAndInsertMM ownTxIns ownTxOuts camUtxo)
@@ -393,41 +387,40 @@ trackingRollbackTxs (getEncInfo -> encInfo) allAddress getDiff getTs txs =
             mDiff = getDiff blkHeader
             mTs = getTs blkHeader
             tx@(UnsafeTx (NE.toList -> inps) (NE.toList -> outs) _) = taTx
-            !txid = hash taTx
-            undoL' = catMaybes undoL
-            resolvedInputs = zip inps undoL'
+            !txId = hash taTx
+        let resolvedInputs :: [(TxIn, TxOutAux)]
+            resolvedInputs = catMaybes $ zipWith (fmap . (,)) inps undoL
             txOutgoings = map txOutAddress outs
             txInputs = map (toaOut . snd) resolvedInputs
 
-            ownInputs = selectOwnAddresses encInfo (txOutAddress . toaOut) undoL'
-            ownOutputs = selectOwnAddresses encInfo txOutAddress $ outs
-            ownInputMetas = map snd ownInputs
-            ownOutputMetas = map snd ownOutputs
-            ownInputAddrs = map cwamId ownInputMetas
-            ownOutputAddrs = map cwamId ownOutputMetas
+        let ownInputs :: [((TxIn, TxOutAux), CWAddressMeta)]
+            ownInputs = selectOwnAddresses encInfo (txOutAddress . toaOut . snd) resolvedInputs
+        let ownOutputs :: [((Word32, TxOut), CWAddressMeta)]
+            ownOutputs = selectOwnAddresses encInfo (txOutAddress . snd) (enumerate outs)
+            ownInputAddrs = map (cwamId . snd) ownInputs
+            ownOutputAddrs = map (cwamId . snd) ownOutputs
+        -- TODO ^ this part duplicates @applyTx@ part, move to function
 
-            l = fromIntegral (length outs) :: Word32
-            ownTxIns = zip inps $ map fst ownInputs
-            ownTxOuts = map (TxInUtxo txid) ([0 .. l - 1] :: [Word32])
+            ownTxOutIns = map (TxInUtxo txId . fst . fst) ownOutputs
 
-            th = THEntry txid tx mDiff txInputs txOutgoings mTs
+            th = THEntry txId tx mDiff txInputs txOutgoings mTs
 
             deletedHistory =
                 if (not $ null ownInputAddrs) || (not $ null ownOutputAddrs)
                 then DL.snoc camDeletedHistory th
                 else camDeletedHistory
 
-            deletedPtxCandidates = DL.cons (txid, th) camDeletedPtxCandidates
+            deletedPtxCandidates = DL.cons (txId, th) camDeletedPtxCandidates
 
         -- Rollback isn't needed, because we don't use @utxoGet@
         -- (undo contains all required information)
-        let usedAddrs = map cwamId ownOutputMetas
+        let usedAddrs = ownOutputAddrs
             changeAddrs = evalChange allAddress ownInputAddrs ownOutputAddrs
         CAccModifier
-            (deleteAndInsertIMM ownOutputMetas [] camAddresses)
+            (deleteAndInsertIMM (map snd ownOutputs) [] camAddresses)
             (deleteAndInsertVM (zip usedAddrs hhs) [] camUsed)
             (deleteAndInsertVM (zip changeAddrs hhs) [] camChange)
-            (deleteAndInsertMM ownTxOuts ownTxIns camUtxo)
+            (deleteAndInsertMM ownTxOutIns (map fst ownInputs) camUtxo)
             camAddedHistory
             deletedHistory
             camAddedPtxCandidates
